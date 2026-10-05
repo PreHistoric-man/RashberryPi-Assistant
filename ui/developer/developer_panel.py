@@ -1,5 +1,7 @@
 """Developer panel UI overlay for previewing and testing assistant states and telemetry."""
 
+from typing import Any, Callable, Dict, Tuple
+
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor, QFont
 from PySide6.QtWidgets import (
@@ -13,18 +15,26 @@ from PySide6.QtWidgets import (
 
 from ui.states import AssistantState
 from .developer_controller import DeveloperController
+from .ai_test_console import AITestConsole
 
 
 class DeveloperPanel(QFrame):
     """Semi-transparent developer overlay panel providing manual state triggers and telemetry."""
 
-    def __init__(self, controller: DeveloperController, parent: QWidget = None):
+    def __init__(
+        self,
+        controller: DeveloperController,
+        generate_response: Callable[[str], Tuple[str, Dict[str, Any]]],
+        parent: QWidget = None,
+    ):
         super().__init__(parent)
         self._controller = controller
         self._current_state = AssistantState.IDLE
         self._state_buttons = {}
 
         self._init_ui()
+        self.ai_test_console = AITestConsole(generate_response, self)
+        self.layout().insertWidget(6, self.ai_test_console)
         self._connect_signals()
 
     def _init_ui(self):
@@ -171,11 +181,25 @@ class DeveloperPanel(QFrame):
 
         layout.addLayout(timing_row)
 
+        # LLM status and response section
+        self.llm_status_label = QLabel("LLM: development fallback", self)
+        self.llm_status_label.setObjectName("TelemetryText")
+        layout.addWidget(self.llm_status_label)
+
+        self.llm_metrics_label = QLabel("LLM: model=-- | threads=-- | ctx=-- | out=--", self)
+        self.llm_metrics_label.setObjectName("TelemetryText")
+        layout.addWidget(self.llm_metrics_label)
+
         # Last Recognized Transcription Display
         self.transcript_label = QLabel("Last STT: (None yet - Press TALK)", self)
         self.transcript_label.setObjectName("LastTranscriptLabel")
         self.transcript_label.setWordWrap(True)
         layout.addWidget(self.transcript_label)
+
+        self.response_label = QLabel("Last LLM: (No response yet)", self)
+        self.response_label.setObjectName("LastTranscriptLabel")
+        self.response_label.setWordWrap(True)
+        layout.addWidget(self.response_label)
 
         # State Selection Buttons
         buttons_layout = QHBoxLayout()
@@ -267,6 +291,23 @@ class DeveloperPanel(QFrame):
             self.transcript_label.setText(f'Last STT: "{text.strip()}"')
         else:
             self.transcript_label.setText("Last STT: (No speech detected)")
+
+    def set_llm_status(self, model_name: str, model_path: str = "", threads: str = "", context_size: str = "", max_tokens: str = "", load_time: float = 0.0):
+        """Update the developer HUD with LLM configuration and timing."""
+        safe_path = model_path.strip()
+        if safe_path and len(safe_path) > 24:
+            safe_path = "..." + safe_path[-20:]
+        self.llm_status_label.setText(
+            f"LLM: {model_name} | model={safe_path or 'n/a'} | threads={threads or 'n/a'} | ctx={context_size or 'n/a'} | out={max_tokens or 'n/a'}"
+        )
+        self.llm_metrics_label.setText(f"LLM load: {load_time:.3f}s | prompt/gen metrics update on response")
+
+    def set_last_response(self, text: str):
+        """Display the latest LLM-generated response."""
+        if text.strip():
+            self.response_label.setText(f'Last LLM: "{text.strip()}"')
+        else:
+            self.response_label.setText("Last LLM: (No response yet)")
 
     def set_error_message(self, error_msg: str):
         """Display error alert in Developer Mode HUD."""

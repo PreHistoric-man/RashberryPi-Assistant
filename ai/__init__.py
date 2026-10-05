@@ -1,5 +1,13 @@
-"""AI module for response generation."""
+"""AI module for response generation and local model integration."""
 
-from .response_engine import BaseResponseEngine, DevelopmentResponseEngine
+from .base_llm import BaseLLM
+from .response_engine import BaseResponseEngine, DevelopmentResponseEngine, LocalResponseEngine
+from .tinyllama import TinyLlama
 
-__all__ = ["BaseResponseEngine", "DevelopmentResponseEngine"]
+__all__ = [
+    "BaseLLM",
+    "BaseResponseEngine",
+    "DevelopmentResponseEngine",
+    "LocalResponseEngine",
+    "TinyLlama",
+]

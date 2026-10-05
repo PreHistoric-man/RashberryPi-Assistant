@@ -122,7 +122,11 @@ class MainWindow(QMainWindow):
         self.layout.addWidget(self.bottom_bar, stretch=0)
 
         # Developer Mode HUD Panel (hidden by default)
-        self.dev_panel = DeveloperPanel(self.dev_controller, self)
+        self.dev_panel = DeveloperPanel(
+            self.dev_controller,
+            self.assistant.generate_developer_response,
+            self,
+        )
         self.dev_panel.setVisible(False)
         self.dev_panel.set_stt_engine_name(self.assistant.stt_engine_name)
         self.layout.addWidget(self.dev_panel, stretch=0)
@@ -132,8 +136,9 @@ class MainWindow(QMainWindow):
         # Connect state manager to UI updates
         self.state_manager.state_changed.connect(self._on_state_changed)
 
-        # Connect Assistant Core STT and Microphone events to UI
+        # Connect Assistant Core STT, LLM, and Microphone events to UI
         self.assistant.transcription_ready.connect(self._on_transcription_ready)
+        self.assistant.response_ready.connect(self._on_response_ready)
         self.assistant.telemetry_updated.connect(self._on_telemetry_updated)
         self.assistant.error_occurred.connect(self._on_assistant_error)
         self.assistant.mic.status_changed.connect(self._on_mic_status_changed)
@@ -156,6 +161,12 @@ class MainWindow(QMainWindow):
         else:
             self.status_label.setText("No speech detected")
             self.status_label.setStyleSheet("color: #94A3B8; font-size: 12px; font-weight: 500; letter-spacing: 1px;")
+
+    def _on_response_ready(self, text: str):
+        """Handle generated response from the local LLM."""
+        self.dev_panel.set_last_response(text)
+        self.status_label.setText(f"AI: {text[:35]}")
+        self.status_label.setStyleSheet("color: #FBBF24; font-size: 12px; font-weight: 600; letter-spacing: 1px;")
 
     def _on_telemetry_updated(self, rec_duration: float, stt_time: float, total_time: float):
         """Handle updated interaction performance measurements."""
@@ -197,6 +208,15 @@ class MainWindow(QMainWindow):
             self.dev_panel.set_stt_engine_name(self.assistant.stt_engine_name)
             self.dev_panel.set_vad_config(self.assistant.vad_silence_duration)
             self.dev_panel.set_last_transcription(self.assistant.last_transcription)
+            self.dev_panel.set_last_response(self.assistant.last_response)
+            self.dev_panel.set_llm_status(
+                getattr(getattr(self.assistant.ai, "llm", self.assistant.ai), "model_name", getattr(self.assistant.ai, "model_name", "development")),
+                getattr(getattr(self.assistant.ai, "llm", self.assistant.ai), "model_path", ""),
+                str(getattr(getattr(self.assistant.ai, "llm", self.assistant.ai), "threads", "n/a")),
+                str(getattr(getattr(self.assistant.ai, "llm", self.assistant.ai), "context_size", "n/a")),
+                str(getattr(getattr(self.assistant.ai, "llm", self.assistant.ai), "max_tokens", "n/a")),
+                getattr(getattr(self.assistant.ai, "llm", self.assistant.ai), "_load_time_seconds", 0.0),
+            )
             self.dev_panel.set_timing_telemetry(
                 self.assistant.last_recording_duration,
                 self.assistant.last_stt_time,
@@ -282,12 +302,20 @@ class MainWindow(QMainWindow):
 
     def keyPressEvent(self, event):
         """Handle developer key events and window shortcuts."""
+        key = event.key()
+
+        # Keep developer shortcuts from consuming typed prompts in the console.
+        if (
+            self.dev_panel.ai_test_console.prompt_input.hasFocus()
+            and key not in (Qt.Key.Key_F12, Qt.Key.Key_F11, Qt.Key.Key_Escape)
+        ):
+            super().keyPressEvent(event)
+            return
+
         # First attempt handling by DeveloperController (F12, 1-5, Space, T, ESC)
         if self.dev_controller.handle_key_press(event):
             event.accept()
             return
-
-        key = event.key()
 
         # F11: Toggle Fullscreen
         if key == Qt.Key.Key_F11:

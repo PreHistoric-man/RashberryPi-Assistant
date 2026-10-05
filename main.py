@@ -9,6 +9,7 @@ Controls during development:
     TALK (Button) : Trigger PC microphone recording & AI voice response
     T / Enter     : Keyboard shortcut to trigger TALK
     F12           : Toggle Developer Mode HUD overlay
+    Ctrl+Enter    : Send a multiline prompt in Developer Mode
     1 - 5         : Set states manually (1=IDLE, 2=LISTENING, 3=THINKING, 4=SPEAKING, 5=ERROR)
     SPACE         : Toggle between IDLE and SPEAKING
     F11           : Toggle fullscreen

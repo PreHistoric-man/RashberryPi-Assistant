@@ -1,12 +1,14 @@
 """Assistant Core orchestrating the interaction lifecycle, audio pipeline, and states."""
 
 import logging
+import os
 import threading
 import time
-from typing import Optional
+from typing import Any, Dict, Optional, Tuple
+
 from PySide6.QtCore import QObject, QTimer, Signal
 
-from ai.response_engine import BaseResponseEngine, DevelopmentResponseEngine
+from ai.response_engine import BaseResponseEngine, DevelopmentResponseEngine, LocalResponseEngine
 from core.state_manager import StateManager
 from ui.states import AssistantState
 from voice.microphone import MicrophoneRecorder
@@ -27,6 +29,7 @@ class AssistantCore(QObject):
 
     # Internal signals for safe cross-thread Qt slot dispatch
     _worker_transcription_done = Signal(str, float, float, float)
+    _worker_response_done = Signal(str)
     _worker_error_occurred = Signal(str)
 
     def __init__(
@@ -42,10 +45,13 @@ class AssistantCore(QObject):
         self.state_manager = state_manager or StateManager(parent=self)
         self.mic = mic_recorder or MicrophoneRecorder(parent=self)
         self.stt = stt_engine or FasterWhisperSTT()
-        self.ai = response_engine or DevelopmentResponseEngine()
+        self.ai = response_engine or self._default_response_engine()
         self.tts = tts_engine or TextToSpeechEngine(parent=self)
+        self._response_lock = threading.Lock()
 
         self._last_transcription = ""
+        self._last_response = ""
+        self._last_llm_error = ""
         self._interaction_start_time = 0.0
         self._recording_duration = 0.0
         self._stt_processing_time = 0.0
@@ -67,10 +73,30 @@ class AssistantCore(QObject):
 
         self._connect_internal_signals()
 
+    @staticmethod
+    def _default_response_engine():
+        model_path = os.getenv("PI_ASSISTANT_LLM_MODEL_PATH")
+        if model_path:
+            try:
+                return LocalResponseEngine()
+            except Exception as exc:
+                logger.warning("[AI] Falling back to development response engine because local model is unavailable: %s", exc)
+        return DevelopmentResponseEngine()
+
     @property
     def last_transcription(self) -> str:
         """Return the most recent recognized transcription text."""
         return self._last_transcription
+
+    @property
+    def last_response(self) -> str:
+        """Return the most recent LLM response text."""
+        return self._last_response
+
+    @property
+    def last_llm_error(self) -> str:
+        """Return the most recent LLM error string."""
+        return self._last_llm_error
 
     @property
     def stt_engine_name(self) -> str:
@@ -109,8 +135,8 @@ class AssistantCore(QObject):
 
     def _connect_internal_signals(self):
         """Connect voice pipeline events to state and interaction handlers."""
-        # Cross-thread worker completion dispatched to main thread slots
         self._worker_transcription_done.connect(self._on_worker_transcription_done)
+        self._worker_response_done.connect(self._on_worker_response_done)
         self._worker_error_occurred.connect(self._handle_error)
 
         self.mic.audio_captured.connect(self._on_audio_captured)
@@ -141,7 +167,7 @@ class AssistantCore(QObject):
         self.mic.start_recording()
 
     def process_input(self, text: str):
-        """Process transcribed user input through AI (reserved for future milestone)."""
+        """Process transcribed user input through AI."""
         logger.info("[Assistant] State -> THINKING")
         self.state_manager.set_state(AssistantState.THINKING)
         logger.info("[Assistant] Input received: '%s'", text)
@@ -174,7 +200,6 @@ class AssistantCore(QObject):
         logger.info("[Assistant] State -> THINKING")
         self.state_manager.set_state(AssistantState.THINKING)
 
-        # Run faster-whisper speech-to-text in background worker thread
         threading.Thread(
             target=self._transcribe_worker,
             args=(wav_bytes,),
@@ -193,7 +218,6 @@ class AssistantCore(QObject):
                 else stt_processing_time
             )
 
-            # Safely dispatch completion to main thread
             self._worker_transcription_done.emit(
                 text,
                 self._recording_duration,
@@ -221,19 +245,50 @@ class AssistantCore(QObject):
         self.transcription_ready.emit(text)
         self.telemetry_updated.emit(rec_duration, stt_processing_time, total_time)
 
-        # Display transcription in UI/Dev Mode, then return safely to IDLE
+        if text and text.strip():
+            threading.Thread(
+                target=self._generate_response_worker,
+                args=(text,),
+                daemon=True,
+            ).start()
+            return
+
         self._idle_return_timer.start()
 
     def _generate_response_worker(self, text: str):
-        """Worker thread for AI response generation (reserved for AI milestone)."""
+        """Worker thread for AI response generation without blocking the UI loop."""
         try:
-            response = self.ai.generate_response(text)
+            if not hasattr(self.ai, "generate_response"):
+                self._worker_response_done.emit("")
+                return
+
+            with self._response_lock:
+                response = self.ai.generate_response(text)
+            self._last_response = response
+            self._last_llm_error = ""
             logger.info("[AI] Response generated: '%s'", response)
-            self.response_ready.emit(response)
-            self.start_speaking(response)
+            self._worker_response_done.emit(response)
         except Exception as e:
+            self._last_llm_error = str(e)
             logger.error("[AI] Response generation exception: %s", e)
-            self._handle_error(f"AI response generation error: {e}")
+            self._worker_error_occurred.emit(f"AI response generation error: {e}")
+
+    def generate_developer_response(self, text: str) -> Tuple[str, Dict[str, Any]]:
+        """Generate a developer-console response without entering the voice pipeline."""
+        if not hasattr(self.ai, "generate_response"):
+            raise RuntimeError("The active response engine does not support text generation.")
+
+        with self._response_lock:
+            response = self.ai.generate_response(text)
+            metrics = dict(getattr(self.ai, "last_generation_metrics", {}) or {})
+        return response, metrics
+
+    def _on_worker_response_done(self, response: str):
+        """Handle generated LLM response on the main Qt thread."""
+        self.response_ready.emit(response)
+        if response and response.strip():
+            self._last_response = response
+        self._idle_return_timer.start()
 
     def _on_tts_started(self):
         """Handle TTS playback started."""
@@ -252,6 +307,17 @@ class AssistantCore(QObject):
         """Handle TTS errors."""
         self._handle_error(err_msg)
 
+    def _return_to_idle(self):
+        """Safely return the assistant to IDLE after processing is complete."""
+        if self.state_manager.current_state != AssistantState.ERROR:
+            logger.info("[Assistant] State -> IDLE")
+            self.state_manager.set_state(AssistantState.IDLE)
+
+    def _recover_to_idle(self):
+        """Recover from ERROR state back to IDLE."""
+        logger.info("[Assistant] State -> IDLE")
+        self.state_manager.set_state(AssistantState.IDLE)
+
     def _handle_error(self, err_msg: str):
         """Transition to ERROR state, emit notification, and schedule auto-recovery."""
         logger.error("[Assistant] Error: %s", err_msg)
@@ -259,14 +325,3 @@ class AssistantCore(QObject):
         logger.info("[Assistant] State -> ERROR")
         self.state_manager.set_state(AssistantState.ERROR)
         self._error_recovery_timer.start()
-
-    def _return_to_idle(self):
-        """Return safely to IDLE after transcription display."""
-        if self.state_manager.current_state == AssistantState.THINKING:
-            logger.info("[Assistant] State -> IDLE")
-            self.state_manager.set_state(AssistantState.IDLE)
-
-    def _recover_to_idle(self):
-        """Safely recover to IDLE after an error."""
-        logger.info("[Assistant] State -> IDLE")
-        self.state_manager.set_state(AssistantState.IDLE)
