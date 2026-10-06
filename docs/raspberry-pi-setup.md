@@ -44,10 +44,10 @@ bindings, while the OS libraries provide common desktop display dependencies.
 
 ## Get the source and create the virtual environment
 
-Use the repository URL configured for your GitHub account:
+Clone the GitHub source of truth:
 
 ```sh
-git clone <repository-url> "$HOME/AiAssistant"
+git clone https://github.com/PreHistoric-man/RashberryPi-Assistant.git "$HOME/AiAssistant"
 cd "$HOME/AiAssistant"
 python3 -m venv .venv
 source .venv/bin/activate
@@ -118,6 +118,24 @@ There is no `.env` loader in the application. Export variables in the shell
 used to launch it, or source a private shell configuration file. Do not commit
 secrets or machine-specific paths.
 
+For a persistent per-user setup, create `$HOME/.config/pi-assistant/env.sh`,
+put the exports below in it, and restrict it to your user:
+
+```sh
+mkdir -p "$HOME/.config/pi-assistant"
+chmod 700 "$HOME/.config/pi-assistant"
+nano "$HOME/.config/pi-assistant/env.sh"
+chmod 600 "$HOME/.config/pi-assistant/env.sh"
+```
+
+Source that file in the terminal before starting the application:
+
+```sh
+set -a
+. "$HOME/.config/pi-assistant/env.sh"
+set +a
+```
+
 ```sh
 export PI_ASSISTANT_LLM_MODEL_PATH="$HOME/AiAssistant/models/tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf"
 export PI_ASSISTANT_LLM_THREADS=3
@@ -137,6 +155,40 @@ export PI_ASSISTANT_TTS_DEVICE=cpu
 `PI_ASSISTANT_AUDIO_OUTPUT_DEVICE` is optional. Leave it unset to use the
 system default, or set it to a PortAudio device index/name after identifying
 the device on the Pi.
+
+## Repeatable Windows → GitHub → Pi update
+
+On Windows, commit and push source/documentation changes to `main`. Review
+staged files before committing; model paths are ignored and must not be force
+added:
+
+```powershell
+git status --short
+git add <changed-source-and-documentation-paths>
+git diff --cached --check
+git status --short
+git commit -m "Describe the change"
+git push origin main
+```
+
+On the Pi, update an existing checkout and install any changed dependencies in
+its virtual environment:
+
+```sh
+cd "$HOME/AiAssistant"
+git pull --ff-only origin main
+source .venv/bin/activate
+python -m pip install -r requirements.txt
+python -m pip check
+set -a
+. "$HOME/.config/pi-assistant/env.sh"
+set +a
+python main.py
+```
+
+For first deployment, use the clone and setup steps above before running these
+update commands. Model files remain on the Pi/local transfer path and are never
+downloaded by Git or the application.
 
 ## Verify imports and run
 
