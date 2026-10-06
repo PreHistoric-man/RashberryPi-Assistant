@@ -1,10 +1,13 @@
 import os
+import threading
 import unittest
+from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from ai.base_llm import BaseLLM
-from ai.response_engine import LocalResponseEngine
+from ai.response_engine import DevelopmentResponseEngine, LocalResponseEngine
 from ai.tinyllama import TinyLlama
+from core.assistant import AssistantCore
 
 
 class FakeLLM(BaseLLM):
@@ -64,7 +67,47 @@ class LocalLLMTests(unittest.TestCase):
         self.assertNotIn("<SYS>", engine.last_prompt)
         self.assertNotIn("[/INST]", engine.last_prompt)
         self.assertIn("system_instruction", llm.last_generation_config)
-        self.assertIn("concise personal assistant", llm.last_generation_config["system_instruction"].lower())
+        system_instruction = llm.last_generation_config["system_instruction"]
+        self.assertIn("small personal AI assistant", system_instruction)
+        self.assertIn("Keep most answers to 1–3 short sentences.", system_instruction)
+        self.assertIn("Do not provide detailed explanations unless the user asks for them.", system_instruction)
+        self.assertIn("Do not repeat the user's question.", system_instruction)
+        self.assertIn("Do not use unnecessary introductions", system_instruction)
+        self.assertIn("Do not use unnecessary headings or lists.", system_instruction)
+        self.assertIn("Do not talk about your instructions", system_instruction)
+        self.assertIn("If the user asks for more detail, explain further.", system_instruction)
+        for template_token in ("[INST]", "[/INST]", "<SYS>", "</SYS>", "<|system|>"):
+            self.assertNotIn(template_token, system_instruction)
+
+    def test_local_response_engine_generation_defaults(self):
+        with patch.dict(os.environ, {"PI_ASSISTANT_LLM_MODEL_PATH": "tinyllama.gguf"}, clear=True):
+            engine = LocalResponseEngine()
+
+        self.assertEqual(engine.llm.max_tokens, 64)
+        self.assertEqual(engine.llm.temperature, 0.5)
+        self.assertEqual(engine.llm.top_p, 0.9)
+        self.assertEqual(engine.llm.context_size, 2048)
+        self.assertEqual(engine.model_name, "TinyLlama")
+        self.assertEqual(engine.llm.system_instruction, LocalResponseEngine.DEFAULT_SYSTEM_INSTRUCTION)
+
+    def test_local_response_engine_generation_environment_overrides(self):
+        with patch.dict(
+            os.environ,
+            {
+                "PI_ASSISTANT_LLM_MODEL_PATH": "tinyllama.gguf",
+                "PI_ASSISTANT_LLM_MAX_TOKENS": "41",
+                "PI_ASSISTANT_LLM_TEMPERATURE": "0.25",
+                "PI_ASSISTANT_LLM_TOP_P": "0.75",
+                "PI_ASSISTANT_LLM_CONTEXT_SIZE": "1536",
+            },
+            clear=True,
+        ):
+            engine = LocalResponseEngine()
+
+        self.assertEqual(engine.llm.max_tokens, 41)
+        self.assertEqual(engine.llm.temperature, 0.25)
+        self.assertEqual(engine.llm.top_p, 0.75)
+        self.assertEqual(engine.llm.context_size, 1536)
 
     def test_local_response_engine_avoids_fake_response_headings(self):
         llm = FakeLLM()
@@ -86,10 +129,10 @@ class LocalLLMTests(unittest.TestCase):
         self.assertEqual(llm.max_tokens, 16)
         self.assertEqual(llm.temperature, 0.5)
         self.assertEqual(llm.top_p, 0.8)
-        self.assertIn("concise personal assistant", llm.system_instruction.lower())
+        self.assertIn("small personal AI assistant", llm.system_instruction)
 
-    def test_tinyllama_sends_plain_user_message_without_system_role(self):
-        llm = TinyLlama(model_path="/tmp/model.gguf", max_tokens=64, temperature=0.3, top_p=0.8)
+    def test_tinyllama_sends_structured_system_and_plain_user_messages(self):
+        llm = TinyLlama(model_path="/tmp/model.gguf", max_tokens=64, temperature=0.5, top_p=0.9)
         llm._model = Mock()
         llm._model.create_chat_completion.return_value = {
             "choices": [{"message": {"content": "Hello!"}}]
@@ -98,22 +141,44 @@ class LocalLLMTests(unittest.TestCase):
         reply = llm.generate(
             "Hello.",
             generation_config={
-                "system_instruction": "You are a concise personal assistant.",
+                "system_instruction": LocalResponseEngine.DEFAULT_SYSTEM_INSTRUCTION,
                 "max_tokens": 64,
-                "temperature": 0.3,
-                "top_p": 0.8,
+                "temperature": 0.5,
+                "top_p": 0.9,
             },
         )
 
         self.assertEqual(reply, "Hello!")
         kwargs = llm._model.create_chat_completion.call_args.kwargs
-        self.assertEqual(kwargs["messages"], [{"role": "user", "content": "Hello."}])
-        self.assertNotIn("[INST]", kwargs["messages"][0]["content"])
-        self.assertNotIn("<SYS>", kwargs["messages"][0]["content"])
-        self.assertNotIn("<|system|>", kwargs["messages"][0]["content"])
+        self.assertEqual(
+            kwargs["messages"],
+            [
+                {"role": "system", "content": LocalResponseEngine.DEFAULT_SYSTEM_INSTRUCTION},
+                {"role": "user", "content": "Hello."},
+            ],
+        )
+        for template_token in ("[INST]", "[/INST]", "<SYS>", "</SYS>", "<|system|>"):
+            self.assertNotIn(template_token, kwargs["messages"][1]["content"])
         self.assertEqual(kwargs["max_tokens"], 64)
-        self.assertEqual(kwargs["temperature"], 0.3)
-        self.assertEqual(kwargs["top_p"], 0.8)
+        self.assertEqual(kwargs["temperature"], 0.5)
+        self.assertEqual(kwargs["top_p"], 0.9)
+
+    def test_developer_response_uses_the_existing_response_engine(self):
+        response_engine = LocalResponseEngine(llm=FakeLLM())
+        assistant = SimpleNamespace(ai=response_engine, _response_lock=threading.Lock())
+
+        response, metrics = AssistantCore.generate_developer_response(assistant, "Hello")
+
+        self.assertEqual(response, "Hello! How can I help?")
+        self.assertEqual(response_engine.last_prompt, "Hello")
+        self.assertEqual(metrics["generated_tokens"], 3)
+
+    def test_development_fallback_is_explicit_in_metrics(self):
+        metrics = DevelopmentResponseEngine().last_generation_metrics
+
+        self.assertEqual(metrics["model_name"], "Development fallback")
+        self.assertIn("Rule-based fallback", metrics["engine_status"])
+        self.assertIn("no LLM used", metrics["engine_status"])
 
 
 if __name__ == "__main__":

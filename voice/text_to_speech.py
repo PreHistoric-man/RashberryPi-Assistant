@@ -1,11 +1,46 @@
 """Text-to-Speech engine module for AI Assistant voice output."""
 
+from dataclasses import dataclass
 import logging
 import threading
-from typing import Optional
+from typing import Optional, Protocol, runtime_checkable
+
+import numpy as np
 from PySide6.QtCore import QObject, Signal
 
 logger = logging.getLogger("pi_assistant.voice.tts")
+
+
+@dataclass(frozen=True)
+class SpeechAudio:
+    """PCM audio returned by a text-to-speech engine."""
+
+    samples: np.ndarray
+    sample_rate: int
+
+    @property
+    def duration_seconds(self) -> float:
+        """Return the duration of the audio in seconds."""
+        if self.samples.size == 0:
+            return 0.0
+        return self.samples.shape[0] / self.sample_rate
+
+
+@runtime_checkable
+class BaseTextToSpeechEngine(Protocol):
+    """Model-agnostic contract for synthesizing and playing speech."""
+
+    def synthesize(self, text: str) -> SpeechAudio:
+        """Convert text to in-memory audio without playing it."""
+        ...
+
+    def speak(self, text: str) -> SpeechAudio:
+        """Synthesize text and send the resulting audio to playback."""
+        ...
+
+    def stop(self) -> None:
+        """Stop active playback."""
+        ...
 
 
 class TextToSpeechEngine(QObject):
@@ -87,3 +122,10 @@ class TextToSpeechEngine(QObject):
         # For simple non-blocking TTS, thread terminates naturally on completion
         with self._lock:
             self._is_speaking = False
+
+
+__all__ = [
+    "BaseTextToSpeechEngine",
+    "SpeechAudio",
+    "TextToSpeechEngine",
+]

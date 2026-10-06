@@ -23,15 +23,8 @@ class BaseResponseEngine(Protocol):
 class DevelopmentResponseEngine:
     """Development rule-based response engine stub."""
 
-    @property
-    def model_name(self) -> str:
-        return "development"
-
-    @property
-    def last_generation_metrics(self) -> Dict[str, Any]:
-        return {"model_name": self.model_name, "generated_tokens": 0, "generation_time_seconds": 0.0}
-
-    def __init__(self):
+    def __init__(self, fallback_reason: str = "PI_ASSISTANT_LLM_MODEL_PATH is not set"):
+        self.fallback_reason = fallback_reason
         self._patterns = [
             (r"\b(hello|hi|hey|greetings)\b", "Hello! How can I help you today?"),
             (r"\b(what can you do|who are you|what are you)\b", "I'm your assistant. I'm still being built, but I can hear and talk with you!"),
@@ -43,6 +36,20 @@ class DevelopmentResponseEngine:
         ]
         self.last_prompt: str = ""
         self.last_response: str = ""
+
+    @property
+    def model_name(self) -> str:
+        return "Development fallback"
+
+    @property
+    def last_generation_metrics(self) -> Dict[str, Any]:
+        return {
+            "model_name": self.model_name,
+            "generated_tokens": 0,
+            "generation_time_seconds": 0.0,
+            "tokens_per_second": 0.0,
+            "engine_status": f"Rule-based fallback; no LLM used ({self.fallback_reason})",
+        }
 
     def _get_time_response(self) -> str:
         now = datetime.datetime.now()
@@ -75,22 +82,19 @@ class DevelopmentResponseEngine:
 class LocalResponseEngine:
     """Application-level interface that adapts a local LLM to the assistant pipeline."""
 
-    DEFAULT_SYSTEM_INSTRUCTION = (
-        "You are a concise personal assistant. Answer the user's question directly in 1-3 short sentences. "
-        "Be natural and conversational. Do not add introductions, headings, marketing language, or unrelated filler. "
-        "When the user asks for detail, provide a brief but complete answer."
-    )
+    DEFAULT_SYSTEM_INSTRUCTION = TinyLlama.DEFAULT_SYSTEM_INSTRUCTION
 
     def __init__(self, llm: Optional[BaseLLM] = None, system_instruction: Optional[str] = None):
+        self.system_instruction = system_instruction or self.DEFAULT_SYSTEM_INSTRUCTION
         self.llm = llm or TinyLlama(
             model_path=os.getenv("PI_ASSISTANT_LLM_MODEL_PATH"),
             threads=int(os.getenv("PI_ASSISTANT_LLM_THREADS", "3") or "3"),
             context_size=int(os.getenv("PI_ASSISTANT_LLM_CONTEXT_SIZE", "2048") or "2048"),
             max_tokens=int(os.getenv("PI_ASSISTANT_LLM_MAX_TOKENS", "64") or "64"),
-            temperature=float(os.getenv("PI_ASSISTANT_LLM_TEMPERATURE", "0.3") or "0.3"),
-            top_p=float(os.getenv("PI_ASSISTANT_LLM_TOP_P", "0.8") or "0.8"),
+            temperature=float(os.getenv("PI_ASSISTANT_LLM_TEMPERATURE", "0.5") or "0.5"),
+            top_p=float(os.getenv("PI_ASSISTANT_LLM_TOP_P", "0.9") or "0.9"),
+            system_instruction=self.system_instruction,
         )
-        self.system_instruction = system_instruction or self.DEFAULT_SYSTEM_INSTRUCTION
         self.last_prompt = ""
         self.last_response = ""
         self._last_generation_metrics: Dict[str, Any] = {}
@@ -113,8 +117,8 @@ class LocalResponseEngine:
             text = self.llm.generate(
                 prompt,
                 generation_config={
-                    "max_tokens": getattr(self.llm, "max_tokens", 128),
-                    "temperature": getattr(self.llm, "temperature", 0.7),
+                    "max_tokens": getattr(self.llm, "max_tokens", 64),
+                    "temperature": getattr(self.llm, "temperature", 0.5),
                     "top_p": getattr(self.llm, "top_p", 0.9),
                     "system_instruction": self.system_instruction,
                 },
@@ -125,6 +129,7 @@ class LocalResponseEngine:
 
         self.last_response = text.strip()
         self._last_generation_metrics = getattr(self.llm, "last_generation_metrics", {})
+        self._last_generation_metrics.setdefault("engine_status", "Local TinyLlama via llama.cpp")
         return self.last_response
 
 

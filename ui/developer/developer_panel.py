@@ -1,6 +1,6 @@
 """Developer panel UI overlay for previewing and testing assistant states and telemetry."""
 
-from typing import Any, Callable, Dict, Tuple
+from typing import Any, Callable, Dict, Optional, Tuple
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor, QFont
@@ -26,6 +26,8 @@ class DeveloperPanel(QFrame):
         controller: DeveloperController,
         generate_response: Callable[[str], Tuple[str, Dict[str, Any]]],
         parent: QWidget = None,
+        speak_response: Optional[Callable[[str], bool]] = None,
+        get_tts_metrics: Optional[Callable[[], Dict[str, Any]]] = None,
     ):
         super().__init__(parent)
         self._controller = controller
@@ -33,7 +35,12 @@ class DeveloperPanel(QFrame):
         self._state_buttons = {}
 
         self._init_ui()
-        self.ai_test_console = AITestConsole(generate_response, self)
+        self.ai_test_console = AITestConsole(
+            generate_response,
+            self,
+            speak_response=speak_response,
+            get_tts_metrics=get_tts_metrics,
+        )
         self.layout().insertWidget(6, self.ai_test_console)
         self._connect_signals()
 

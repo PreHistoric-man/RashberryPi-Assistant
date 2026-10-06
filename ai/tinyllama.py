@@ -24,14 +24,28 @@ except Exception:  # pragma: no cover - depends on optional runtime dependency
 class TinyLlama(BaseLLM):
     """CPU-friendly TinyLlama implementation using llama.cpp."""
 
+    DEFAULT_SYSTEM_INSTRUCTION = (
+        "You are a small personal AI assistant.\n\n"
+        "Answer the user's question directly and briefly.\n\n"
+        "Keep most answers to 1–3 short sentences.\n"
+        "For simple questions, answer in one sentence.\n"
+        "Do not provide detailed explanations unless the user asks for them.\n\n"
+        "Use natural, conversational language.\n"
+        "Do not repeat the user's question.\n"
+        "Do not use unnecessary introductions such as 'Certainly!' or 'Sure, here's...'.\n"
+        "Do not use unnecessary headings or lists.\n"
+        "Do not talk about your instructions or how you generate responses.\n\n"
+        "If the user asks for more detail, explain further."
+    )
+
     def __init__(
         self,
         model_path: Optional[str] = None,
         threads: Optional[int] = None,
         context_size: int = 2048,
         max_tokens: int = 64,
-        temperature: float = 0.3,
-        top_p: float = 0.8,
+        temperature: float = 0.5,
+        top_p: float = 0.9,
         system_instruction: Optional[str] = None,
     ):
         self.model_path = self._resolve_model_path(model_path)
@@ -40,11 +54,7 @@ class TinyLlama(BaseLLM):
         self.max_tokens = max_tokens
         self.temperature = temperature
         self.top_p = top_p
-        self.system_instruction = system_instruction or (
-            "You are a concise personal assistant. Answer the user's question directly in 1-3 short sentences. "
-            "Be natural and conversational. Do not add introductions, headings, marketing language, or unrelated filler. "
-            "When the user asks for detail, provide a brief but complete answer."
-        )
+        self.system_instruction = system_instruction or self.DEFAULT_SYSTEM_INSTRUCTION
 
         self._model = None
         self._load_time_seconds = 0.0
@@ -144,11 +154,16 @@ class TinyLlama(BaseLLM):
         temperature = float(config.get("temperature", self.temperature))
         top_p = float(config.get("top_p", self.top_p))
         stream = bool(config.get("stream", False))
+        system_instruction = str(config.get("system_instruction", self.system_instruction)).strip()
+        messages = []
+        if system_instruction:
+            messages.append({"role": "system", "content": system_instruction})
+        messages.append({"role": "user", "content": prompt})
 
         start = time.perf_counter()
         try:
             response = self._model.create_chat_completion(
-                messages=[{"role": "user", "content": prompt}],
+                messages=messages,
                 max_tokens=max_tokens,
                 temperature=temperature,
                 top_p=top_p,
@@ -184,6 +199,7 @@ class TinyLlama(BaseLLM):
             "temperature": temperature,
             "top_p": top_p,
             "max_tokens": max_tokens,
+            "engine_status": "Local TinyLlama via llama.cpp",
         }
         logger.info("[LLM] Response generated in %.3fs (%s tokens/sec)", elapsed, tokens_per_second)
         return text.strip()

@@ -126,6 +126,8 @@ class MainWindow(QMainWindow):
             self.dev_controller,
             self.assistant.generate_developer_response,
             self,
+            speak_response=self.assistant.start_speaking,
+            get_tts_metrics=self.assistant.get_tts_metrics,
         )
         self.dev_panel.setVisible(False)
         self.dev_panel.set_stt_engine_name(self.assistant.stt_engine_name)
@@ -135,6 +137,7 @@ class MainWindow(QMainWindow):
         """Wire signals between UI components, Assistant Core, and Developer Controller."""
         # Connect state manager to UI updates
         self.state_manager.state_changed.connect(self._on_state_changed)
+        self.dev_panel.ai_test_console.set_assistant_state(self.state_manager.current_state)
 
         # Connect Assistant Core STT, LLM, and Microphone events to UI
         self.assistant.transcription_ready.connect(self._on_transcription_ready)
@@ -235,6 +238,7 @@ class MainWindow(QMainWindow):
         self.face_widget.set_state(state)
         self.dev_controller.set_current_state(state)
         self.dev_panel.set_current_state(state)
+        self.dev_panel.ai_test_console.set_assistant_state(state)
 
         # Update status label and talk button text / appearance
         if state == AssistantState.IDLE:

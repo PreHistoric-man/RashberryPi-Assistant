@@ -14,6 +14,7 @@ from ui.states import AssistantState
 from voice.microphone import MicrophoneRecorder
 from voice.speech_to_text import BaseSpeechToTextEngine, FasterWhisperSTT
 from voice.text_to_speech import TextToSpeechEngine
+from voice.tts.piper_tts import PiperTextToSpeechEngine
 
 logger = logging.getLogger("pi_assistant.core")
 
@@ -31,6 +32,9 @@ class AssistantCore(QObject):
     _worker_transcription_done = Signal(str, float, float, float)
     _worker_response_done = Signal(str)
     _worker_error_occurred = Signal(str)
+    _worker_tts_started = Signal()
+    _worker_tts_finished = Signal()
+    _worker_tts_failed = Signal(str)
 
     def __init__(
         self,
@@ -46,8 +50,9 @@ class AssistantCore(QObject):
         self.mic = mic_recorder or MicrophoneRecorder(parent=self)
         self.stt = stt_engine or FasterWhisperSTT()
         self.ai = response_engine or self._default_response_engine()
-        self.tts = tts_engine or TextToSpeechEngine(parent=self)
+        self.tts = tts_engine or self._default_tts_engine(parent=self)
         self._response_lock = threading.Lock()
+        self._tts_lock = threading.Lock()
 
         self._last_transcription = ""
         self._last_response = ""
@@ -76,12 +81,23 @@ class AssistantCore(QObject):
     @staticmethod
     def _default_response_engine():
         model_path = os.getenv("PI_ASSISTANT_LLM_MODEL_PATH")
+        if not model_path:
+            return DevelopmentResponseEngine("PI_ASSISTANT_LLM_MODEL_PATH is not set")
+        try:
+            return LocalResponseEngine()
+        except Exception as exc:
+            logger.warning("[AI] Falling back to development response engine because local model is unavailable: %s", exc)
+            return DevelopmentResponseEngine(f"local model initialization failed: {exc}")
+
+    @staticmethod
+    def _default_tts_engine(parent=None):
+        model_path = os.getenv("PI_ASSISTANT_TTS_MODEL_PATH")
         if model_path:
             try:
-                return LocalResponseEngine()
+                return PiperTextToSpeechEngine(model_path=model_path, parent=parent)
             except Exception as exc:
-                logger.warning("[AI] Falling back to development response engine because local model is unavailable: %s", exc)
-        return DevelopmentResponseEngine()
+                logger.warning("[TTS] Falling back to desktop TTS because Piper is unavailable: %s", exc)
+        return TextToSpeechEngine(parent=parent)
 
     @property
     def last_transcription(self) -> str:
@@ -138,13 +154,21 @@ class AssistantCore(QObject):
         self._worker_transcription_done.connect(self._on_worker_transcription_done)
         self._worker_response_done.connect(self._on_worker_response_done)
         self._worker_error_occurred.connect(self._handle_error)
+        self._worker_tts_started.connect(self._on_tts_started)
+        self._worker_tts_finished.connect(self._on_tts_finished)
+        self._worker_tts_failed.connect(self._on_worker_tts_failed)
 
         self.mic.audio_captured.connect(self._on_audio_captured)
         self.mic.error_occurred.connect(self._on_mic_error)
 
-        self.tts.speech_started.connect(self._on_tts_started)
-        self.tts.speech_finished.connect(self._on_tts_finished)
-        self.tts.error_occurred.connect(self._on_tts_error)
+        for signal_name, handler in (
+            ("speech_started", self._on_tts_started),
+            ("speech_finished", self._on_tts_finished),
+            ("error_occurred", self._on_tts_error),
+        ):
+            signal = getattr(self.tts, signal_name, None)
+            if signal is not None:
+                signal.connect(handler)
 
     # --- Interaction Lifecycle API ---
 
@@ -172,12 +196,47 @@ class AssistantCore(QObject):
         self.state_manager.set_state(AssistantState.THINKING)
         logger.info("[Assistant] Input received: '%s'", text)
 
-    def start_speaking(self, text: str):
-        """Transition to SPEAKING and synthesize speech output."""
-        logger.info("[Assistant] State -> SPEAKING")
-        self.state_manager.set_state(AssistantState.SPEAKING)
-        logger.info("[TTS] Speaking: '%s'", text)
-        self.tts.speak(text)
+    def start_speaking(self, text: str) -> bool:
+        """Start speech through the shared TTS engine without blocking the UI."""
+        cleaned = (text or "").strip()
+        if not cleaned:
+            return False
+
+        if not self._tts_lock.acquire(blocking=False):
+            logger.info("[TTS] Ignoring speech request because speech is already active.")
+            return False
+
+        self._idle_return_timer.stop()
+
+        logger.info("[TTS] Speaking: '%s'", cleaned)
+
+        if hasattr(self.tts, "speech_started") and hasattr(self.tts, "speech_finished"):
+            threading.Thread(target=self._tts_worker, args=(cleaned,), daemon=True).start()
+            return True
+
+        threading.Thread(target=self._tts_worker_fallback, args=(cleaned,), daemon=True).start()
+        return True
+
+    def _tts_worker(self, text: str):
+        """Run TTS synthesis/playback in a background worker while keeping the UI responsive."""
+        try:
+            self.tts.speak(text)
+        except Exception as exc:
+            logger.exception("[TTS] Speech synthesis failed")
+            if not hasattr(self.tts, "error_occurred"):
+                self._worker_tts_failed.emit(f"TTS synthesis error: {exc}")
+
+    def _tts_worker_fallback(self, text: str):
+        """Handle TTS engines without built-in lifecycle signals."""
+        self._worker_tts_started.emit()
+        try:
+            self.tts.speak(text)
+        except Exception as exc:
+            logger.exception("[TTS] Speech synthesis failed")
+            if not hasattr(self.tts, "error_occurred"):
+                self._worker_tts_failed.emit(f"TTS synthesis error: {exc}")
+        else:
+            self._worker_tts_finished.emit()
 
     def stop(self):
         """Halt all active operations and return to IDLE."""
@@ -283,11 +342,17 @@ class AssistantCore(QObject):
             metrics = dict(getattr(self.ai, "last_generation_metrics", {}) or {})
         return response, metrics
 
+    def get_tts_metrics(self) -> Dict[str, Any]:
+        """Return metrics supplied by the active TTS engine, when available."""
+        return dict(getattr(self.tts, "last_synthesis_metrics", {}) or {})
+
     def _on_worker_response_done(self, response: str):
         """Handle generated LLM response on the main Qt thread."""
         self.response_ready.emit(response)
         if response and response.strip():
             self._last_response = response
+            self.start_speaking(response)
+            return
         self._idle_return_timer.start()
 
     def _on_tts_started(self):
@@ -296,6 +361,9 @@ class AssistantCore(QObject):
 
     def _on_tts_finished(self):
         """Handle TTS playback finished."""
+        self._release_tts_lock()
+        if self.state_manager.current_state == AssistantState.ERROR:
+            return
         logger.info("[Assistant] State -> IDLE")
         self.state_manager.set_state(AssistantState.IDLE)
 
@@ -305,7 +373,18 @@ class AssistantCore(QObject):
 
     def _on_tts_error(self, err_msg: str):
         """Handle TTS errors."""
+        self._release_tts_lock()
         self._handle_error(err_msg)
+
+    def _on_worker_tts_failed(self, err_msg: str):
+        """Handle exceptions from TTS engines that do not emit an error signal."""
+        self._release_tts_lock()
+        self._handle_error(err_msg)
+
+    def _release_tts_lock(self):
+        """Release the speech reservation after the TTS lifecycle completes."""
+        if self._tts_lock.locked():
+            self._tts_lock.release()
 
     def _return_to_idle(self):
         """Safely return the assistant to IDLE after processing is complete."""
