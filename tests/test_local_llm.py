@@ -131,6 +131,20 @@ class LocalLLMTests(unittest.TestCase):
         self.assertEqual(llm.top_p, 0.8)
         self.assertIn("small personal AI assistant", llm.system_instruction)
 
+    def test_tinyllama_load_reuses_one_model_instance(self):
+        llm = TinyLlama(model_path="/tmp/model.gguf")
+        model = Mock()
+        with patch("ai.tinyllama.os.path.exists", return_value=True), patch(
+            "ai.tinyllama.Llama", return_value=model
+        ) as llama_constructor:
+            self.assertTrue(llm.load())
+            loaded_model = llm._model
+            self.assertTrue(llm.load())
+
+        self.assertIs(llm._model, loaded_model)
+        self.assertEqual(llm.model_load_count, 1)
+        llama_constructor.assert_called_once()
+
     def test_tinyllama_sends_structured_system_and_plain_user_messages(self):
         llm = TinyLlama(model_path="/tmp/model.gguf", max_tokens=64, temperature=0.5, top_p=0.9)
         llm._model = Mock()
@@ -162,6 +176,29 @@ class LocalLLMTests(unittest.TestCase):
         self.assertEqual(kwargs["max_tokens"], 64)
         self.assertEqual(kwargs["temperature"], 0.5)
         self.assertEqual(kwargs["top_p"], 0.9)
+
+    def test_tinyllama_uses_backend_token_counts_and_reports_limit_finish_reason(self):
+        llm = TinyLlama(model_path="/tmp/model.gguf", max_tokens=64)
+        llm._model = Mock()
+        llm._model.create_chat_completion.return_value = {
+            "choices": [{
+                "message": {"content": "A response cut off at the token limit"},
+                "finish_reason": "length",
+            }],
+            "usage": {
+                "prompt_tokens": 172,
+                "completion_tokens": 64,
+            },
+        }
+
+        self.assertEqual(llm.generate("Explain this."), "A response cut off at the token limit")
+
+        metrics = llm.last_generation_metrics
+        self.assertEqual(metrics["prompt_tokens"], 172)
+        self.assertEqual(metrics["generated_tokens"], 64)
+        self.assertEqual(metrics["finish_reason"], "length")
+        self.assertTrue(metrics["reached_max_tokens"])
+        self.assertIsNone(metrics["time_to_first_token_seconds"])
 
     def test_developer_response_uses_the_existing_response_engine(self):
         response_engine = LocalResponseEngine(llm=FakeLLM())

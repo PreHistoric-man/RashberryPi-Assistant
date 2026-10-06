@@ -197,6 +197,15 @@ class DeveloperPanel(QFrame):
         self.llm_metrics_label.setObjectName("TelemetryText")
         layout.addWidget(self.llm_metrics_label)
 
+        self.latency_budget_label = QLabel(
+            "Latency | STT: unavailable | LLM: unavailable | TTS: unavailable\n"
+            "Post-speech-to-audio-handoff total: unavailable | Target: <5.00s",
+            self,
+        )
+        self.latency_budget_label.setObjectName("TelemetryText")
+        self.latency_budget_label.setWordWrap(True)
+        layout.addWidget(self.latency_budget_label)
+
         # Last Recognized Transcription Display
         self.transcript_label = QLabel("Last STT: (None yet - Press TALK)", self)
         self.transcript_label.setObjectName("LastTranscriptLabel")
@@ -308,6 +317,19 @@ class DeveloperPanel(QFrame):
             f"LLM: {model_name} | model={safe_path or 'n/a'} | threads={threads or 'n/a'} | ctx={context_size or 'n/a'} | out={max_tokens or 'n/a'}"
         )
         self.llm_metrics_label.setText(f"LLM load: {load_time:.3f}s | prompt/gen metrics update on response")
+
+    def set_latency_budget(self, metrics: Dict[str, Optional[float]]):
+        """Display measured response stages without filling unavailable timings."""
+        def format_time(value: Optional[float]) -> str:
+            return f"{value:.2f}s" if value is not None else "unavailable"
+
+        self.latency_budget_label.setText(
+            f"Latency | STT: {format_time(metrics.get('stt_seconds'))} | "
+            f"LLM: {format_time(metrics.get('llm_seconds'))} | "
+            f"TTS: {format_time(metrics.get('tts_seconds'))}\n"
+            f"Post-speech-to-audio-handoff total: {format_time(metrics.get('total_seconds'))} | "
+            f"Target: <{format_time(metrics.get('target_seconds'))}"
+        )
 
     def set_last_response(self, text: str):
         """Display the latest LLM-generated response."""

@@ -202,9 +202,13 @@ class PiperTextToSpeechEngine(QObject):
 
     def speak(self, text: str) -> SpeechAudio:
         """Synthesize text and play it using the configured audio output."""
+        speech_start = time.perf_counter()
         self.speech_started.emit()
         try:
             audio = self.synthesize(text)
+            self._last_synthesis_metrics["playback_handoff_seconds"] = (
+                time.perf_counter() - speech_start
+            )
             self._audio_player.play(audio)
             return audio
         except Exception as exc:

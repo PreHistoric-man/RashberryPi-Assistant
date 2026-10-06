@@ -13,12 +13,19 @@ logger = logging.getLogger("pi_assistant.ai.tinyllama")
 
 try:
     from llama_cpp import Llama
+    from llama_cpp import llama_cpp as llama_cpp_api
 
     LLAMA_CPP_AVAILABLE = True
 except Exception:  # pragma: no cover - depends on optional runtime dependency
     Llama = None
+    llama_cpp_api = None
     LLAMA_CPP_AVAILABLE = False
     logger.warning("[LLM] llama-cpp-python is not installed or failed to import.")
+
+try:
+    from llama_cpp._internals import LlamaContext
+except ImportError:  # pragma: no cover - depends on optional runtime dependency
+    LlamaContext = None
 
 
 class TinyLlama(BaseLLM):
@@ -58,13 +65,19 @@ class TinyLlama(BaseLLM):
 
         self._model = None
         self._load_time_seconds = 0.0
+        self._model_load_count = 0
         self._last_generation_metrics: Dict[str, Any] = {
             "model_name": "TinyLlama",
             "load_time_seconds": 0.0,
             "generation_time_seconds": 0.0,
+            "llm_wall_time_seconds": 0.0,
             "generated_tokens": 0,
             "tokens_per_second": 0.0,
             "prompt_tokens": 0,
+            "prompt_eval_time_seconds": None,
+            "time_to_first_token_seconds": None,
+            "finish_reason": None,
+            "reached_max_tokens": False,
             "temperature": self.temperature,
             "top_p": self.top_p,
         }
@@ -84,6 +97,11 @@ class TinyLlama(BaseLLM):
     @last_generation_metrics.setter
     def last_generation_metrics(self, value: Dict[str, Any]) -> None:
         self._last_generation_metrics = dict(value)
+
+    @property
+    def model_load_count(self) -> int:
+        """Return the number of successful model loads for this instance."""
+        return self._model_load_count
 
     @staticmethod
     def _resolve_model_path(model_path: Optional[str]) -> str:
@@ -132,6 +150,7 @@ class TinyLlama(BaseLLM):
                 verbose=False,
             )
             self._load_time_seconds = time.perf_counter() - start
+            self._model_load_count += 1
             self._last_generation_metrics["load_time_seconds"] = self._load_time_seconds
             logger.info("[LLM] TinyLlama model loaded in %.3fs", self._load_time_seconds)
             return True
@@ -160,6 +179,15 @@ class TinyLlama(BaseLLM):
             messages.append({"role": "system", "content": system_instruction})
         messages.append({"role": "user", "content": prompt})
 
+        model_context = getattr(self._model, "_ctx", None)
+        has_perf_metrics = (
+            LlamaContext is not None
+            and isinstance(model_context, LlamaContext)
+            and callable(getattr(llama_cpp_api, "llama_perf_context", None))
+        )
+        if has_perf_metrics:
+            model_context.reset_timings()
+
         start = time.perf_counter()
         try:
             response = self._model.create_chat_completion(
@@ -185,23 +213,47 @@ class TinyLlama(BaseLLM):
         except Exception as exc:  # pragma: no cover - runtime backend specific
             raise RuntimeError(f"TinyLlama generation failed: {exc}") from exc
 
-        elapsed = time.perf_counter() - start
-        prompt_tokens = max(1, len(prompt.split()))
-        generated_tokens = max(1, len(text.split()))
-        tokens_per_second = generated_tokens / elapsed if elapsed > 0 else 0.0
+        wall_time = time.perf_counter() - start
+        usage = response.get("usage", {}) if isinstance(response, dict) else {}
+        prompt_tokens = usage.get("prompt_tokens")
+        generated_tokens = usage.get("completion_tokens")
+        finish_reason = None
+        choices = response.get("choices", []) if isinstance(response, dict) else []
+        if choices and isinstance(choices[0], dict):
+            finish_reason = choices[0].get("finish_reason")
+
+        prompt_eval_time = None
+        generation_time = wall_time
+        if has_perf_metrics:
+            timings = llama_cpp_api.llama_perf_context(model_context.ctx)
+            prompt_eval_time = float(timings.t_p_eval_ms) / 1000.0
+            if timings.t_eval_ms > 0:
+                generation_time = float(timings.t_eval_ms) / 1000.0
+
+        tokens_per_second = (
+            float(generated_tokens) / generation_time
+            if generated_tokens is not None and generation_time > 0
+            else 0.0
+        )
         self._last_generation_metrics = {
             "model_name": self.model_name,
             "load_time_seconds": self._load_time_seconds,
-            "generation_time_seconds": elapsed,
+            "model_load_count": self._model_load_count,
+            "generation_time_seconds": generation_time,
+            "llm_wall_time_seconds": wall_time,
             "generated_tokens": generated_tokens,
             "tokens_per_second": tokens_per_second,
             "prompt_tokens": prompt_tokens,
+            "prompt_eval_time_seconds": prompt_eval_time,
+            "time_to_first_token_seconds": None,
+            "finish_reason": finish_reason,
+            "reached_max_tokens": finish_reason == "length",
             "temperature": temperature,
             "top_p": top_p,
             "max_tokens": max_tokens,
             "engine_status": "Local TinyLlama via llama.cpp",
         }
-        logger.info("[LLM] Response generated in %.3fs (%s tokens/sec)", elapsed, tokens_per_second)
+        logger.info("[LLM] Response generated in %.3fs (%s tokens/sec)", wall_time, tokens_per_second)
         return text.strip()
 
     def unload(self) -> None:

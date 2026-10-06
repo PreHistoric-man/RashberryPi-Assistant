@@ -61,6 +61,12 @@ class AssistantCore(QObject):
         self._recording_duration = 0.0
         self._stt_processing_time = 0.0
         self._total_interaction_time = 0.0
+        self._llm_processing_time: Optional[float] = None
+        self._llm_generation_metrics: Dict[str, Any] = {}
+        self._last_tts_processing_time: Optional[float] = None
+        self._post_capture_start_time = 0.0
+        self._tts_worker_start_time = 0.0
+        self._post_speech_latency: Optional[float] = None
         self._silence_tail_duration = 0.0
         self._time_until_speech = 0.0
 
@@ -220,6 +226,7 @@ class AssistantCore(QObject):
     def _tts_worker(self, text: str):
         """Run TTS synthesis/playback in a background worker while keeping the UI responsive."""
         try:
+            self._tts_worker_start_time = time.perf_counter()
             self.tts.speak(text)
         except Exception as exc:
             logger.exception("[TTS] Speech synthesis failed")
@@ -230,6 +237,7 @@ class AssistantCore(QObject):
         """Handle TTS engines without built-in lifecycle signals."""
         self._worker_tts_started.emit()
         try:
+            self._tts_worker_start_time = time.perf_counter()
             self.tts.speak(text)
         except Exception as exc:
             logger.exception("[TTS] Speech synthesis failed")
@@ -252,6 +260,12 @@ class AssistantCore(QObject):
 
     def _on_audio_captured(self, wav_bytes: bytes):
         """Handle recorded audio buffer from microphone."""
+        self._post_capture_start_time = time.perf_counter()
+        self._tts_worker_start_time = 0.0
+        self._llm_processing_time = None
+        self._llm_generation_metrics = {}
+        self._last_tts_processing_time = None
+        self._post_speech_latency = None
         self._recording_duration = self.mic.last_duration
         self._silence_tail_duration = getattr(self.mic, "silence_tail_duration", 0.0)
         self._time_until_speech = getattr(self.mic, "time_until_speech_detected", 0.0)
@@ -322,7 +336,12 @@ class AssistantCore(QObject):
                 return
 
             with self._response_lock:
+                llm_start_time = time.perf_counter()
                 response = self.ai.generate_response(text)
+                self._llm_processing_time = time.perf_counter() - llm_start_time
+                self._llm_generation_metrics = dict(
+                    getattr(self.ai, "last_generation_metrics", {}) or {}
+                )
             self._last_response = response
             self._last_llm_error = ""
             logger.info("[AI] Response generated: '%s'", response)
@@ -346,6 +365,17 @@ class AssistantCore(QObject):
         """Return metrics supplied by the active TTS engine, when available."""
         return dict(getattr(self.tts, "last_synthesis_metrics", {}) or {})
 
+    def get_latency_metrics(self) -> Dict[str, Optional[float]]:
+        """Return measured interaction-stage timings, leaving unavailable values unset."""
+        llm_time = self._llm_generation_metrics.get("llm_wall_time_seconds")
+        return {
+            "stt_seconds": self._stt_processing_time if self._post_capture_start_time else None,
+            "llm_seconds": float(llm_time) if llm_time is not None else self._llm_processing_time,
+            "tts_seconds": self._last_tts_processing_time,
+            "total_seconds": self._post_speech_latency,
+            "target_seconds": 5.0,
+        }
+
     def _on_worker_response_done(self, response: str):
         """Handle generated LLM response on the main Qt thread."""
         self.response_ready.emit(response)
@@ -362,6 +392,24 @@ class AssistantCore(QObject):
     def _on_tts_finished(self):
         """Handle TTS playback finished."""
         self._release_tts_lock()
+        tts_metrics = self.get_tts_metrics()
+        self._post_speech_latency = None
+        synthesis_time = tts_metrics.get("synthesis_time_seconds")
+        self._last_tts_processing_time = (
+            float(synthesis_time) if synthesis_time is not None else None
+        )
+        handoff_time = tts_metrics.get("playback_handoff_seconds")
+        if (
+            handoff_time is not None
+            and self._tts_worker_start_time > 0.0
+            and self._post_capture_start_time > 0.0
+        ):
+            self._post_speech_latency = (
+                self._tts_worker_start_time
+                + float(handoff_time)
+                - self._post_capture_start_time
+                + self._silence_tail_duration
+            )
         if self.state_manager.current_state == AssistantState.ERROR:
             return
         logger.info("[Assistant] State -> IDLE")

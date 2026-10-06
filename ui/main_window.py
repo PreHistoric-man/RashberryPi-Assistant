@@ -228,6 +228,7 @@ class MainWindow(QMainWindow):
                 time_to_speech=self.assistant.last_time_until_speech,
                 capture_time=self.assistant.mic.total_capture_time,
             )
+            self.dev_panel.set_latency_budget(self.assistant.get_latency_metrics())
 
     def set_state(self, state: AssistantState):
         """Update global assistant state via state manager."""
@@ -239,6 +240,8 @@ class MainWindow(QMainWindow):
         self.dev_controller.set_current_state(state)
         self.dev_panel.set_current_state(state)
         self.dev_panel.ai_test_console.set_assistant_state(state)
+        if state == AssistantState.IDLE:
+            self.dev_panel.set_latency_budget(self.assistant.get_latency_metrics())
 
         # Update status label and talk button text / appearance
         if state == AssistantState.IDLE:

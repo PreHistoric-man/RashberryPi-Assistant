@@ -406,6 +406,32 @@ class FullPipelineTests(unittest.TestCase):
         self.finish_playback()
         self.assertEqual(self.tts.calls, ["Recovered response."])
 
+    def test_latency_budget_uses_measured_stages_and_handoff_only(self):
+        self.assistant._post_capture_start_time = time.perf_counter() - 1.0
+        self.assistant._stt_processing_time = 0.2
+        self.assistant._llm_processing_time = 0.3
+        self.assistant._llm_generation_metrics = {"llm_wall_time_seconds": 0.3}
+        self.assistant._silence_tail_duration = 0.5
+        self.assistant._tts_worker_start_time = time.perf_counter() - 0.15
+        self.tts.last_synthesis_metrics = {
+            "synthesis_time_seconds": 0.1,
+            "playback_handoff_seconds": 0.12,
+        }
+
+        self.assistant._on_tts_finished()
+
+        metrics = self.assistant.get_latency_metrics()
+        self.assertEqual(metrics["stt_seconds"], 0.2)
+        self.assertEqual(metrics["llm_seconds"], 0.3)
+        self.assertEqual(metrics["tts_seconds"], 0.1)
+        self.assertIsNotNone(metrics["total_seconds"])
+        self.assertGreater(metrics["total_seconds"], 0.5)
+        self.assertEqual(metrics["target_seconds"], 5.0)
+
+        self.tts.last_synthesis_metrics = {"synthesis_time_seconds": 0.2}
+        self.assistant._on_tts_finished()
+        self.assertIsNone(self.assistant.get_latency_metrics()["total_seconds"])
+
     def test_tts_failure_reports_error_recovers_and_later_succeeds(self):
         self.tts.results = [RuntimeError("fake TTS failure"), None]
         errors = []
@@ -472,6 +498,10 @@ class RealPiperPipelineTests(unittest.TestCase):
             self.assertGreater(metrics["synthesis_time_seconds"], 0)
             self.assertGreater(metrics["audio_duration_seconds"], 0)
             self.assertGreater(metrics["real_time_factor"], 0)
+            self.assertGreaterEqual(
+                metrics["playback_handoff_seconds"],
+                metrics["synthesis_time_seconds"],
+            )
             self.assertEqual(
                 states,
                 [

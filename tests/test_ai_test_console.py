@@ -13,6 +13,7 @@ from core.assistant import AssistantCore
 from core.state_manager import StateManager
 from ui.developer.ai_test_console import AITestConsole
 from ui.developer.developer_controller import DeveloperController
+from ui.developer.developer_panel import DeveloperPanel
 from ui.states import AssistantState
 
 
@@ -197,6 +198,40 @@ class DeveloperAITestConsoleTests(unittest.TestCase):
         self.assertIn("Synthesis: 0.090s", metrics)
         self.assertIn("Audio: 1.840s", metrics)
         self.assertIn("RTF: 0.049", metrics)
+
+    def test_developer_panel_shows_measured_latency_and_marks_missing_stages(self):
+        controller = DeveloperController()
+        panel = DeveloperPanel(controller, Mock())
+        self.addCleanup(controller._fps_timer.stop)
+
+        panel.set_latency_budget({
+            "stt_seconds": 1.25,
+            "llm_seconds": 1.5,
+            "tts_seconds": 0.2,
+            "total_seconds": 3.1,
+            "target_seconds": 5.0,
+        })
+        self.assertIn("STT: 1.25s", panel.latency_budget_label.text())
+        self.assertIn("LLM: 1.50s", panel.latency_budget_label.text())
+        self.assertIn("TTS: 0.20s", panel.latency_budget_label.text())
+        self.assertIn(
+            "Post-speech-to-audio-handoff total: 3.10s",
+            panel.latency_budget_label.text(),
+        )
+        self.assertIn("Target: <5.00s", panel.latency_budget_label.text())
+
+        panel.set_latency_budget({
+            "stt_seconds": None,
+            "llm_seconds": None,
+            "tts_seconds": None,
+            "total_seconds": None,
+            "target_seconds": 5.0,
+        })
+        self.assertEqual(
+            panel.latency_budget_label.text(),
+            "Latency | STT: unavailable | LLM: unavailable | TTS: unavailable\n"
+            "Post-speech-to-audio-handoff total: unavailable | Target: <5.00s",
+        )
 
     def test_console_uses_assistant_core_instances_for_generate_and_speak(self):
         response_engine = Mock()
